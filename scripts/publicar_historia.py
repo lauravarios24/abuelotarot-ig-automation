@@ -6,6 +6,7 @@ Se ejecuta desde GitHub Actions. No requiere intervencion manual.
 import os
 import sys
 import json
+import time
 import subprocess
 import datetime
 
@@ -22,7 +23,7 @@ FONT_REGULAR = "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf"
 
 IG_USER_ID = os.environ["IG_USER_ID"]
 IG_ACCESS_TOKEN = os.environ["IG_ACCESS_TOKEN"]
-GITHUB_REPOSITORY = os.environ["GITHUB_REPOSITORY"]  # lo pone GitHub Actions solo, formato "usuario/repo"
+GITHUB_REPOSITORY = os.environ["GITHUB_REPOSITORY"]
 
 
 def cargar_textos():
@@ -35,8 +36,6 @@ def dia_del_anio():
 
 
 def fase_lunar(fecha=None):
-    """Devuelve la edad de la luna en dias (0 = luna nueva, ~14.77 = luna llena).
-    Calculo aproximado (precision de horas), suficiente para uso editorial."""
     fecha = fecha or datetime.datetime.utcnow()
     referencia = datetime.datetime(2000, 1, 6, 18, 14)
     sinodico = 29.53058867
@@ -72,7 +71,7 @@ def dibujar_centrado(draw, lineas, font, centro_x, centro_y, color="white", inte
         bbox = draw.textbbox((0, 0), linea, font=font)
         ancho = bbox[2] - bbox[0]
         x = centro_x - ancho / 2
-        draw.text((x + 2, y + 2), linea, font=font, fill="black")  # sombra para legibilidad
+        draw.text((x + 2, y + 2), linea, font=font, fill="black")
         draw.text((x, y), linea, font=font, fill=color)
         y += alto_linea
 
@@ -141,7 +140,7 @@ def commit_y_url(ruta_relativa):
 
     sin_cambios = subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=ROOT).returncode == 0
     if sin_cambios:
-        print("Aviso: no hay cambios que commitear (¿ya se publico hoy esta franja?). Se usara el ultimo commit.")
+        print("Aviso: no hay cambios que commitear. Se usara el ultimo commit.")
     else:
         git("commit", "-m", f"auto: historia {ruta_relativa}")
         git("push")
@@ -152,6 +151,21 @@ def commit_y_url(ruta_relativa):
     return f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/{sha}/{ruta_relativa}"
 
 
+def esperar_contenedor_listo(creation_id, intentos=10, espera=3):
+    url = f"https://graph.instagram.com/v21.0/{creation_id}"
+    for _ in range(intentos):
+        r = requests.get(url, params={"fields": "status_code", "access_token": IG_ACCESS_TOKEN})
+        r.raise_for_status()
+        estado = r.json().get("status_code")
+        print("Estado del contenedor:", estado)
+        if estado == "FINISHED":
+            return
+        if estado == "ERROR":
+            raise RuntimeError(f"Instagram no pudo procesar la imagen: {r.json()}")
+        time.sleep(espera)
+    raise TimeoutError("El contenedor no termino de procesar a tiempo.")
+
+
 def publicar_en_instagram(image_url):
     base = f"https://graph.instagram.com/v21.0/{IG_USER_ID}"
 
@@ -160,14 +174,20 @@ def publicar_en_instagram(image_url):
         "media_type": "STORIES",
         "access_token": IG_ACCESS_TOKEN,
     })
+    if not r.ok:
+        print("Error al crear el contenedor:", r.status_code, r.text)
     r.raise_for_status()
     creation_id = r.json()["id"]
     print("Contenedor creado:", creation_id)
+
+    esperar_contenedor_listo(creation_id)
 
     r2 = requests.post(f"{base}/media_publish", data={
         "creation_id": creation_id,
         "access_token": IG_ACCESS_TOKEN,
     })
+    if not r2.ok:
+        print("Error al publicar:", r2.status_code, r2.text)
     r2.raise_for_status()
     print("Historia publicada:", r2.json())
 

@@ -1,0 +1,50 @@
+name: Historias automaticas Instagram
+
+on:
+  schedule:
+    - cron: '0 7 * * *'   # 9h Madrid (horario de verano, UTC+2)
+    - cron: '0 11 * * *'  # 13h Madrid
+    - cron: '0 16 * * *'  # 18h Madrid
+  workflow_dispatch:
+    inputs:
+      slot:
+        description: 'Franja a publicar manualmente'
+        required: true
+        type: choice
+        options: ['9h', '13h', '18h']
+
+jobs:
+  publicar:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+
+      - name: Determinar franja
+        id: franja
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "slot=${{ github.event.inputs.slot }}" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event.schedule }}" = "0 7 * * *" ]; then
+            echo "slot=9h" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event.schedule }}" = "0 11 * * *" ]; then
+            echo "slot=13h" >> "$GITHUB_OUTPUT"
+          else
+            echo "slot=18h" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publicar historia
+        env:
+          IG_USER_ID: ${{ secrets.IG_USER_ID }}
+          IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
+        run: python scripts/publicar_historia.py ${{ steps.franja.outputs.slot }}

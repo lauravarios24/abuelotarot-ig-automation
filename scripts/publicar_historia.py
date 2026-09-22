@@ -2,17 +2,26 @@
 """
 Genera y publica una historia de Instagram (9h / 13h / 18h) de forma automatica.
 Se ejecuta desde GitHub Actions. No requiere intervencion manual.
+
+- 9h: usa las plantillas subidas en templates/9h/ (sin tocar).
+- 13h y 18h: el fondo se genera por codigo (gradiente + luna/mandala + paneles),
+  ya no dependen de imagenes subidas a mano.
 """
 import os
 import sys
 import json
 import time
+import random
 import subprocess
 import datetime
+from io import BytesIO
 
 import requests
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageChops
 from pilmoji import Pilmoji
+from pilmoji.source import HTTPBasedSource
+
+W, H = 1080, 1920
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TEMPLATES = os.path.join(ROOT, "templates")
@@ -50,6 +59,44 @@ def fase_lunar(fecha=None):
     sinodico = 29.53058867
     dias = (fecha - referencia).total_seconds() / 86400.0
     return dias % sinodico
+
+
+def cargar_fuente(path, size, variacion=None):
+    """Carga una fuente TTF. Si el archivo es una fuente variable (como la que
+    exporta Google Fonts cuando solo hay un peso disponible) y se pide una
+    variacion concreta (ej. 'SemiBold'), la aplica. Si es una fuente estatica
+    normal, la usa tal cual sin fallar."""
+    f = ImageFont.truetype(path, size)
+    if variacion:
+        try:
+            nombres = f.get_variation_names()
+            objetivo = variacion.encode()
+            if objetivo in nombres:
+                f.set_variation_by_name(variacion)
+        except Exception:
+            pass  # fuente estatica: ya tiene el peso correcto por si misma
+    return f
+
+
+class TwemojiGithubSource(HTTPBasedSource):
+    """Sirve los PNG de emoji (estilo Twemoji) directamente desde GitHub,
+    en vez del CDN por defecto de pilmoji. Mas estable/predecible."""
+
+    BASE = "https://raw.githubusercontent.com/jdecked/twemoji/main/assets/72x72/"
+
+    def get_emoji(self, emoji, /):
+        codepoints = "-".join(f"{ord(c):x}" for c in emoji)
+        for candidato in (codepoints, codepoints.replace("-fe0f", "")):
+            try:
+                data = self.request(self.BASE + candidato + ".png")
+                if data:
+                    return BytesIO(data)
+            except Exception:
+                continue
+        return None
+
+    def get_discord_emoji(self, id, /):
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -90,46 +137,6 @@ def dibujar_centrado(draw, lineas, font, centro_x, centro_y, color="white", inte
     return y
 
 
-# ---------------------------------------------------------------------------
-# Texto CON emoticonos (historias de las 13h y 18h, via pilmoji)
-# ---------------------------------------------------------------------------
-
-def envolver_texto_emoji(pilmoji, texto, font, max_width):
-    palabras = texto.split()
-    lineas, actual = [], ""
-    for palabra in palabras:
-        prueba = (actual + " " + palabra).strip()
-        ancho, _ = pilmoji.getsize(prueba, font=font)
-        if ancho <= max_width:
-            actual = prueba
-        else:
-            if actual:
-                lineas.append(actual)
-            actual = palabra
-    if actual:
-        lineas.append(actual)
-    return lineas
-
-
-def dibujar_centrado_emoji(pilmoji, lineas, font, centro_x, centro_y, color="white", interlineado=1.35):
-    if not lineas:
-        return centro_y
-    alturas = [pilmoji.getsize(l, font=font)[1] for l in lineas]
-    alto_linea = max(alturas) * interlineado
-    alto_total = alto_linea * len(lineas)
-    y = centro_y - alto_total / 2
-    for linea in lineas:
-        ancho, _ = pilmoji.getsize(linea, font=font)
-        x = centro_x - ancho / 2
-        pilmoji.text((x, y), linea, fill=color, font=font, stroke_width=2, stroke_fill="black")
-        y += alto_linea
-    return y
-
-
-# ---------------------------------------------------------------------------
-# Generadores por franja
-# ---------------------------------------------------------------------------
-
 def generar_9h(textos, dia):
     idx_img = (dia % 10) + 1
     ruta_img = os.path.join(TEMPLATES, "9h", f"{idx_img:02d}.png")
@@ -151,26 +158,174 @@ def generar_9h(textos, dia):
     return img
 
 
+# ---------------------------------------------------------------------------
+# Fondo generado por codigo + texto CON emoticonos (13h y 18h, via pilmoji)
+# ---------------------------------------------------------------------------
+
+def envolver_texto_emoji(pm, texto, font, max_width):
+    palabras = texto.split()
+    lineas, actual = [], ""
+    for palabra in palabras:
+        prueba = (actual + " " + palabra).strip()
+        ancho, _ = pm.getsize(prueba, font=font)
+        if ancho <= max_width:
+            actual = prueba
+        else:
+            if actual:
+                lineas.append(actual)
+            actual = palabra
+    if actual:
+        lineas.append(actual)
+    return lineas
+
+
+def bloque_alto(pm, lineas, font, interlineado=1.2):
+    if not lineas:
+        return 0
+    alturas = [pm.getsize(l, font=font)[1] for l in lineas]
+    return max(alturas) * interlineado * len(lineas)
+
+
+def dibujar_centrado_emoji(pm, lineas, font, centro_x, centro_y, color="white", interlineado=1.2):
+    if not lineas:
+        return centro_y
+    alto_linea = max(pm.getsize(l, font=font)[1] for l in lineas) * interlineado
+    alto_total = alto_linea * len(lineas)
+    y = centro_y - alto_total / 2
+    for linea in lineas:
+        ancho, _ = pm.getsize(linea, font=font)
+        x = centro_x - ancho / 2
+        pm.text((x, y), linea, fill=color, font=font)
+        y += alto_linea
+    return y
+
+
+def gradiente_vertical(size, arriba, abajo):
+    w, h = size
+    base = Image.new("RGB", (1, h))
+    for y in range(h):
+        t = y / (h - 1)
+        r = int(arriba[0] + (abajo[0] - arriba[0]) * t)
+        g = int(arriba[1] + (abajo[1] - arriba[1]) * t)
+        b = int(arriba[2] + (abajo[2] - arriba[2]) * t)
+        base.putpixel((0, y), (r, g, b))
+    return base.resize((w, h))
+
+
+def agregar_estrellas(img, dia, n=110):
+    draw = ImageDraw.Draw(img, "RGBA")
+    rnd = random.Random(dia)  # fija segun el dia, para que no cambien entre intentos
+    for _ in range(n):
+        x = rnd.randint(0, W)
+        y = rnd.randint(0, H)
+        r = rnd.choice([1, 1, 1, 2, 2, 3])
+        alpha = rnd.randint(60, 200)
+        draw.ellipse([x - r, y - r, x + r, y + r], fill=(255, 244, 214, alpha))
+
+
+def panel_redondeado(img, box, radius=40, fill=(20, 8, 24, 150)):
+    x0, y0, x1, y1 = (int(round(v)) for v in box)
+    capa = Image.new("RGBA", (x1 - x0, y1 - y0), (0, 0, 0, 0))
+    ImageDraw.Draw(capa).rounded_rectangle([0, 0, x1 - x0, y1 - y0], radius=radius, fill=fill)
+    img.alpha_composite(capa, (x0, y0))
+
+
+def luna_creciente(img, centro, radio, glow=True):
+    cx, cy = centro
+    capa = Image.new("RGBA", (radio * 4, radio * 4), (0, 0, 0, 0))
+    d = ImageDraw.Draw(capa)
+    lc = (radio * 2, radio * 2)
+    if glow:
+        for gr in range(radio + 60, radio, -6):
+            a = max(int(70 * (1 - (gr - radio) / 60)), 0)
+            d.ellipse([lc[0] - gr, lc[1] - gr, lc[0] + gr, lc[1] + gr], fill=(240, 205, 140, a))
+
+    mascara = Image.new("L", capa.size, 0)
+    ImageDraw.Draw(mascara).ellipse(
+        [lc[0] - radio, lc[1] - radio, lc[0] + radio, lc[1] + radio], fill=255
+    )
+    sombra = Image.new("L", capa.size, 0)
+    off = int(radio * 0.55)
+    ImageDraw.Draw(sombra).ellipse(
+        [lc[0] - radio + off, lc[1] - radio - int(radio * 0.1),
+         lc[0] + radio + off, lc[1] + radio - int(radio * 0.1)], fill=255
+    )
+    mascara_final = ImageChops.subtract(mascara, sombra)
+    solido = Image.new("RGBA", capa.size, (247, 224, 175, 255))
+    capa.paste(solido, (0, 0), mascara_final)
+    img.alpha_composite(capa, (cx - radio * 2, cy - radio * 2))
+
+
+def fondo_base(dia, arriba, abajo):
+    img = gradiente_vertical((W, H), arriba, abajo).convert("RGBA")
+    agregar_estrellas(img, dia)
+    return img
+
+
 def generar_13h(textos, dia):
-    letra = "a" if dia % 2 == 0 else "b"
-    ruta_img = os.path.join(TEMPLATES, "13h", f"{letra}.png")
     par = textos["preguntas_13h"][dia % len(textos["preguntas_13h"])]
 
-    img = Image.open(ruta_img).convert("RGB")
-    font_pregunta = ImageFont.truetype(FONT_SEMIBOLD_NUEVA, 46)
-    font_opcion = ImageFont.truetype(FONT_REGULAR_NUEVA, 40)
+    img = fondo_base(dia, (36, 10, 28), (70, 14, 30))
+    draw = ImageDraw.Draw(img, "RGBA")
 
-    with Pilmoji(img) as pilmoji:
-        lineas_p = envolver_texto_emoji(pilmoji, par["pregunta"], font_pregunta, max_width=780)
-        dibujar_centrado_emoji(pilmoji, lineas_p, font_pregunta, centro_x=540, centro_y=250)
+    cx = W // 2
+    cy_top = 240
+    for i, rr in enumerate([140, 105, 72]):
+        draw.ellipse([cx - rr, cy_top - rr, cx + rr, cy_top + rr],
+                     outline=(230, 200, 150, 90 - i * 10), width=2)
+    draw.ellipse([cx - 12, cy_top - 12, cx + 12, cy_top + 12], fill=(240, 205, 140, 230))
 
-        lineas_a = envolver_texto_emoji(pilmoji, par["opcion_a"], font_opcion, max_width=360)
-        dibujar_centrado_emoji(pilmoji, lineas_a, font_opcion, centro_x=280, centro_y=650)
+    f_pregunta = cargar_fuente(FONT_SEMIBOLD_NUEVA, 96, "SemiBold")
+    f_opcion = cargar_fuente(FONT_SEMIBOLD_NUEVA, 72, "SemiBold")
+    f_vs = cargar_fuente(FONT_REGULAR_NUEVA, 44, "Regular")
+    f_foot = cargar_fuente(FONT_SEMIBOLD_NUEVA, 58, "SemiBold")
 
-        lineas_b = envolver_texto_emoji(pilmoji, par["opcion_b"], font_opcion, max_width=360)
-        dibujar_centrado_emoji(pilmoji, lineas_b, font_opcion, centro_x=800, centro_y=650)
+    with Pilmoji(img, source=TwemojiGithubSource) as pm:
+        # panel de la pregunta (alto dinamico segun el texto real)
+        lineas_p = envolver_texto_emoji(pm, par["pregunta"], f_pregunta, 900)
+        pad = 70
+        alto_p = bloque_alto(pm, lineas_p, f_pregunta, 1.15)
+        panel_top = 420
+        panel_bottom = panel_top + pad * 2 + alto_p
+        panel_redondeado(img, (50, panel_top, 1030, panel_bottom), radius=40, fill=(20, 6, 16, 150))
+        dibujar_centrado_emoji(pm, lineas_p, f_pregunta, cx, (panel_top + panel_bottom) / 2,
+                                color=(255, 244, 224), interlineado=1.15)
 
-    return img
+        # divisor + "VS"
+        y_div = panel_bottom + 130
+        draw.line([(120, y_div), (960, y_div)], fill=(230, 200, 150, 140), width=2)
+        draw.ellipse([cx - 40, y_div - 40, cx + 40, y_div + 40],
+                     fill=(70, 14, 30, 255), outline=(230, 200, 150, 200), width=2)
+        vsw, vsh = pm.getsize("VS", font=f_vs)
+        pm.text((cx - vsw / 2, y_div - vsh / 2), "VS", fill=(230, 200, 150, 255), font=f_vs)
+
+        # opciones A / B (tamano dinamico)
+        panel_w = 470
+        lineas_a = envolver_texto_emoji(pm, par["opcion_a"], f_opcion, panel_w - 70)
+        lineas_b = envolver_texto_emoji(pm, par["opcion_b"], f_opcion, panel_w - 70)
+        panel_h = max(bloque_alto(pm, lineas_a, f_opcion, 1.2),
+                      bloque_alto(pm, lineas_b, f_opcion, 1.2)) + 90
+
+        top_opts = y_div + 90
+        left_box = (60, top_opts, 60 + panel_w, top_opts + panel_h)
+        right_box = (W - 60 - panel_w, top_opts, W - 60, top_opts + panel_h)
+        panel_redondeado(img, left_box, radius=32, fill=(20, 6, 16, 150))
+        panel_redondeado(img, right_box, radius=32, fill=(20, 6, 16, 150))
+        draw.rounded_rectangle(left_box, radius=32, outline=(230, 200, 150, 170), width=3)
+        draw.rounded_rectangle(right_box, radius=32, outline=(230, 200, 150, 170), width=3)
+
+        lcx = (left_box[0] + left_box[2]) / 2
+        rcx = (right_box[0] + right_box[2]) / 2
+        pcy = (left_box[1] + left_box[3]) / 2
+        dibujar_centrado_emoji(pm, lineas_a, f_opcion, lcx, pcy, color=(255, 244, 224), interlineado=1.2)
+        dibujar_centrado_emoji(pm, lineas_b, f_opcion, rcx, pcy, color=(255, 244, 224), interlineado=1.2)
+
+        # pie
+        pie = "Responde en comentarios ✨"
+        pw, ph = pm.getsize(pie, font=f_foot)
+        pm.text((cx - pw / 2, top_opts + panel_h + 90), pie, fill=(230, 200, 150, 235), font=f_foot)
+
+    return img.convert("RGB")
 
 
 def generar_18h(textos, dia):
@@ -180,24 +335,49 @@ def generar_18h(textos, dia):
     es_llena = abs(edad - sinodico / 2) <= 1
 
     if es_nueva:
-        ruta_img = os.path.join(TEMPLATES, "18h", "especial.png")
         texto = textos["cierre_18h_luna_nueva"]
+        colores = ((10, 8, 40), (40, 14, 60))
     elif es_llena:
-        ruta_img = os.path.join(TEMPLATES, "18h", "especial.png")
         texto = textos["cierre_18h_luna_llena"]
+        colores = ((10, 8, 40), (40, 14, 60))
     else:
-        ruta_img = os.path.join(TEMPLATES, "18h", "normal.png")
         texto = textos["cierres_18h_normal"][dia % len(textos["cierres_18h_normal"])]
+        colores = ((18, 10, 30), (48, 18, 34))
 
-    img = Image.open(ruta_img).convert("RGB")
-    font = ImageFont.truetype(FONT_SEMIBOLD_NUEVA, 44)
+    img = fondo_base(dia, *colores)
+    cx = W // 2
+    luna_creciente(img, (cx, 420), 140)
 
-    with Pilmoji(img) as pilmoji:
-        lineas = envolver_texto_emoji(pilmoji, texto, font, max_width=780)
-        dibujar_centrado_emoji(pilmoji, lineas, font, centro_x=540, centro_y=1380)
+    f_txt = cargar_fuente(FONT_SEMIBOLD_NUEVA, 78, "SemiBold")
+    f_badge = cargar_fuente(FONT_SEMIBOLD_NUEVA, 44, "SemiBold")
+    draw = ImageDraw.Draw(img, "RGBA")
 
-    return img
+    with Pilmoji(img, source=TwemojiGithubSource) as pm:
+        lineas = envolver_texto_emoji(pm, texto, f_txt, 900)
+        pad = 60
+        alto = bloque_alto(pm, lineas, f_txt, 1.2)
+        panel_y0 = 700
+        panel_h = pad * 2 + alto
+        panel_redondeado(img, (50, panel_y0, 1030, panel_y0 + panel_h), radius=40, fill=(15, 6, 20, 160))
+        dibujar_centrado_emoji(pm, lineas, f_txt, cx, panel_y0 + panel_h / 2,
+                                color=(255, 244, 224), interlineado=1.2)
 
+        # chip con el enlace de la comunidad
+        badge_texto = "\U0001F517 Comunidad gratis en mi perfil"
+        bw, bh = pm.getsize(badge_texto, font=f_badge)
+        badge_y0 = panel_y0 + panel_h + 60
+        badge_box = (cx - bw / 2 - 50, badge_y0, cx + bw / 2 + 50, badge_y0 + bh + 60)
+        draw.rounded_rectangle(badge_box, radius=(bh + 60) / 2, fill=(230, 200, 150, 235))
+        bcx = (badge_box[0] + badge_box[2]) / 2
+        bcy = (badge_box[1] + badge_box[3]) / 2
+        pm.text((bcx - bw / 2, bcy - bh / 2), badge_texto, fill=(40, 14, 20, 255), font=f_badge)
+
+    return img.convert("RGB")
+
+
+# ---------------------------------------------------------------------------
+# Publicacion en Instagram (sin cambios de logica)
+# ---------------------------------------------------------------------------
 
 def git(*args):
     subprocess.run(["git", *args], check=True, cwd=ROOT)

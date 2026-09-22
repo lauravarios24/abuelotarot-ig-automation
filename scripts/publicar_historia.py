@@ -349,7 +349,7 @@ def generar_18h(textos, dia):
     luna_creciente(img, (cx, 420), 140)
 
     f_txt = cargar_fuente(FONT_SEMIBOLD_NUEVA, 78, "SemiBold")
-    f_badge = cargar_fuente(FONT_SEMIBOLD_NUEVA, 44, "SemiBold")
+    f_badge = cargar_fuente(FONT_SEMIBOLD_NUEVA, 42, "SemiBold")
     draw = ImageDraw.Draw(img, "RGBA")
 
     with Pilmoji(img, source=TwemojiGithubSource) as pm:
@@ -362,15 +362,20 @@ def generar_18h(textos, dia):
         dibujar_centrado_emoji(pm, lineas, f_txt, cx, panel_y0 + panel_h / 2,
                                 color=(255, 244, 224), interlineado=1.2)
 
-        # chip con el enlace de la comunidad
-        badge_texto = "\U0001F517 Comunidad gratis en mi perfil"
-        bw, bh = pm.getsize(badge_texto, font=f_badge)
+        # chip con el enlace de la comunidad (puede ocupar 1 o 2 lineas)
+        badge_texto = "\U0001F517 Únete a mi Comunidad de Telegram Gratuita — Link en mi perfil"
+        pad_b = 40
+        lineas_badge = envolver_texto_emoji(pm, badge_texto, f_badge, 820)
+        alto_badge = bloque_alto(pm, lineas_badge, f_badge, 1.25)
+        ancho_badge = max(pm.getsize(l, font=f_badge)[0] for l in lineas_badge)
         badge_y0 = panel_y0 + panel_h + 60
-        badge_box = (cx - bw / 2 - 50, badge_y0, cx + bw / 2 + 50, badge_y0 + bh + 60)
-        draw.rounded_rectangle(badge_box, radius=(bh + 60) / 2, fill=(230, 200, 150, 235))
-        bcx = (badge_box[0] + badge_box[2]) / 2
-        bcy = (badge_box[1] + badge_box[3]) / 2
-        pm.text((bcx - bw / 2, bcy - bh / 2), badge_texto, fill=(40, 14, 20, 255), font=f_badge)
+        badge_h = pad_b * 2 + alto_badge
+        badge_w = ancho_badge + 100
+        badge_box = (cx - badge_w / 2, badge_y0, cx + badge_w / 2, badge_y0 + badge_h)
+        radio_badge = min(50, badge_h / 2)
+        draw.rounded_rectangle(badge_box, radius=radio_badge, fill=(230, 200, 150, 235))
+        dibujar_centrado_emoji(pm, lineas_badge, f_badge, cx, badge_y0 + badge_h / 2,
+                                color=(40, 14, 20), interlineado=1.25)
 
     return img.convert("RGB")
 

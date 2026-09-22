@@ -12,18 +12,25 @@ import datetime
 
 import requests
 from PIL import Image, ImageDraw, ImageFont
+from pilmoji import Pilmoji
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TEMPLATES = os.path.join(ROOT, "templates")
 OUTPUT = os.path.join(ROOT, "output")
 TEXTOS_PATH = os.path.join(ROOT, "data", "textos.json")
+FONTS = os.path.join(ROOT, "fonts")
 
+# Fuentes del sistema (solo se usan en la historia de las 9h, que no se toca)
 FONT_BOLD = "/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf"
 FONT_REGULAR = "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf"
 
+# Fuentes nuevas (13h y 18h), subidas por Laura a la carpeta fonts/
+FONT_SEMIBOLD_NUEVA = os.path.join(FONTS, "CormorantGaramond-SemiBold.ttf")
+FONT_REGULAR_NUEVA = os.path.join(FONTS, "CormorantGaramond-Regular.ttf")
+
 IG_USER_ID = os.environ["IG_USER_ID"]
 IG_ACCESS_TOKEN = os.environ["IG_ACCESS_TOKEN"]
-GITHUB_REPOSITORY = os.environ["GITHUB_REPOSITORY"]
+GITHUB_REPOSITORY = os.environ["GITHUB_REPOSITORY"]  # lo pone GitHub Actions solo, formato "usuario/repo"
 
 
 def cargar_textos():
@@ -36,12 +43,18 @@ def dia_del_anio():
 
 
 def fase_lunar(fecha=None):
+    """Devuelve la edad de la luna en dias (0 = luna nueva, ~14.77 = luna llena).
+    Calculo aproximado (precision de horas), suficiente para uso editorial."""
     fecha = fecha or datetime.datetime.utcnow()
     referencia = datetime.datetime(2000, 1, 6, 18, 14)
     sinodico = 29.53058867
     dias = (fecha - referencia).total_seconds() / 86400.0
     return dias % sinodico
 
+
+# ---------------------------------------------------------------------------
+# Texto SIN emoticonos (historia de las 9h, no se toca)
+# ---------------------------------------------------------------------------
 
 def envolver_texto(draw, texto, font, max_width):
     palabras = texto.split()
@@ -62,7 +75,7 @@ def envolver_texto(draw, texto, font, max_width):
 
 def dibujar_centrado(draw, lineas, font, centro_x, centro_y, color="white", interlineado=1.3):
     if not lineas:
-        return
+        return centro_y
     alturas = [draw.textbbox((0, 0), l, font=font)[3] for l in lineas]
     alto_linea = max(alturas) * interlineado
     alto_total = alto_linea * len(lineas)
@@ -71,20 +84,70 @@ def dibujar_centrado(draw, lineas, font, centro_x, centro_y, color="white", inte
         bbox = draw.textbbox((0, 0), linea, font=font)
         ancho = bbox[2] - bbox[0]
         x = centro_x - ancho / 2
-        draw.text((x + 2, y + 2), linea, font=font, fill="black")
+        draw.text((x + 2, y + 2), linea, font=font, fill="black")  # sombra para legibilidad
         draw.text((x, y), linea, font=font, fill=color)
         y += alto_linea
+    return y
 
+
+# ---------------------------------------------------------------------------
+# Texto CON emoticonos (historias de las 13h y 18h, via pilmoji)
+# ---------------------------------------------------------------------------
+
+def envolver_texto_emoji(pilmoji, texto, font, max_width):
+    palabras = texto.split()
+    lineas, actual = [], ""
+    for palabra in palabras:
+        prueba = (actual + " " + palabra).strip()
+        ancho, _ = pilmoji.getsize(prueba, font=font)
+        if ancho <= max_width:
+            actual = prueba
+        else:
+            if actual:
+                lineas.append(actual)
+            actual = palabra
+    if actual:
+        lineas.append(actual)
+    return lineas
+
+
+def dibujar_centrado_emoji(pilmoji, lineas, font, centro_x, centro_y, color="white", interlineado=1.35):
+    if not lineas:
+        return centro_y
+    alturas = [pilmoji.getsize(l, font=font)[1] for l in lineas]
+    alto_linea = max(alturas) * interlineado
+    alto_total = alto_linea * len(lineas)
+    y = centro_y - alto_total / 2
+    for linea in lineas:
+        ancho, _ = pilmoji.getsize(linea, font=font)
+        x = centro_x - ancho / 2
+        pilmoji.text((x, y), linea, fill=color, font=font, stroke_width=2, stroke_fill="black")
+        y += alto_linea
+    return y
+
+
+# ---------------------------------------------------------------------------
+# Generadores por franja
+# ---------------------------------------------------------------------------
 
 def generar_9h(textos, dia):
     idx_img = (dia % 10) + 1
     ruta_img = os.path.join(TEMPLATES, "9h", f"{idx_img:02d}.png")
     texto = textos["consejos_9h"][dia % len(textos["consejos_9h"])]
+    cta = textos.get("cta_9h", "")
+
     img = Image.open(ruta_img).convert("RGB")
     draw = ImageDraw.Draw(img)
+
     font = ImageFont.truetype(FONT_BOLD, 58)
     lineas = envolver_texto(draw, texto, font, max_width=820)
-    dibujar_centrado(draw, lineas, font, centro_x=540, centro_y=1350)
+    y_fin = dibujar_centrado(draw, lineas, font, centro_x=540, centro_y=1300)
+
+    if cta:
+        font_cta = ImageFont.truetype(FONT_REGULAR, 38)
+        lineas_cta = envolver_texto(draw, cta, font_cta, max_width=760)
+        dibujar_centrado(draw, lineas_cta, font_cta, centro_x=540, centro_y=y_fin + 90, color="#e8d9b5")
+
     return img
 
 
@@ -92,16 +155,21 @@ def generar_13h(textos, dia):
     letra = "a" if dia % 2 == 0 else "b"
     ruta_img = os.path.join(TEMPLATES, "13h", f"{letra}.png")
     par = textos["preguntas_13h"][dia % len(textos["preguntas_13h"])]
+
     img = Image.open(ruta_img).convert("RGB")
-    draw = ImageDraw.Draw(img)
-    font_pregunta = ImageFont.truetype(FONT_BOLD, 50)
-    font_opcion = ImageFont.truetype(FONT_REGULAR, 44)
-    lineas_p = envolver_texto(draw, par["pregunta"], font_pregunta, max_width=820)
-    dibujar_centrado(draw, lineas_p, font_pregunta, centro_x=540, centro_y=230)
-    lineas_a = envolver_texto(draw, par["opcion_a"], font_opcion, max_width=380)
-    dibujar_centrado(draw, lineas_a, font_opcion, centro_x=280, centro_y=700)
-    lineas_b = envolver_texto(draw, par["opcion_b"], font_opcion, max_width=380)
-    dibujar_centrado(draw, lineas_b, font_opcion, centro_x=800, centro_y=700)
+    font_pregunta = ImageFont.truetype(FONT_SEMIBOLD_NUEVA, 46)
+    font_opcion = ImageFont.truetype(FONT_REGULAR_NUEVA, 40)
+
+    with Pilmoji(img) as pilmoji:
+        lineas_p = envolver_texto_emoji(pilmoji, par["pregunta"], font_pregunta, max_width=780)
+        dibujar_centrado_emoji(pilmoji, lineas_p, font_pregunta, centro_x=540, centro_y=250)
+
+        lineas_a = envolver_texto_emoji(pilmoji, par["opcion_a"], font_opcion, max_width=360)
+        dibujar_centrado_emoji(pilmoji, lineas_a, font_opcion, centro_x=280, centro_y=650)
+
+        lineas_b = envolver_texto_emoji(pilmoji, par["opcion_b"], font_opcion, max_width=360)
+        dibujar_centrado_emoji(pilmoji, lineas_b, font_opcion, centro_x=800, centro_y=650)
+
     return img
 
 
@@ -122,10 +190,12 @@ def generar_18h(textos, dia):
         texto = textos["cierres_18h_normal"][dia % len(textos["cierres_18h_normal"])]
 
     img = Image.open(ruta_img).convert("RGB")
-    draw = ImageDraw.Draw(img)
-    font = ImageFont.truetype(FONT_BOLD, 50)
-    lineas = envolver_texto(draw, texto, font, max_width=800)
-    dibujar_centrado(draw, lineas, font, centro_x=540, centro_y=1450)
+    font = ImageFont.truetype(FONT_SEMIBOLD_NUEVA, 44)
+
+    with Pilmoji(img) as pilmoji:
+        lineas = envolver_texto_emoji(pilmoji, texto, font, max_width=780)
+        dibujar_centrado_emoji(pilmoji, lineas, font, centro_x=540, centro_y=1380)
+
     return img
 
 
@@ -140,7 +210,7 @@ def commit_y_url(ruta_relativa):
 
     sin_cambios = subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=ROOT).returncode == 0
     if sin_cambios:
-        print("Aviso: no hay cambios que commitear. Se usara el ultimo commit.")
+        print("Aviso: no hay cambios que commitear (¿ya se publico hoy esta franja?). Se usara el ultimo commit.")
     else:
         git("commit", "-m", f"auto: historia {ruta_relativa}")
         git("push")

@@ -1,15 +1,20 @@
 name: Historias automaticas Instagram
 
 on:
-  schedule:
-    # Igual que en el bot de horoscopos: GitHub a veces no dispara los cron
-    # programados a su hora exacta (o directamente no los crea). Como red de
-    # seguridad, comprobamos cada 15 minutos y el script solo actua de verdad
-    # si la hora de Madrid cae en 9h/13h/18h. cron-job.org sigue activo como
-    # disparador de refuerzo por fuera de GitHub — el paso de cache de abajo
-    # evita que la misma franja se publique dos veces aunque los dos
-    # disparadores salten el mismo dia.
-    - cron: '*/15 * * * *'
+  # PAUSADO TEMPORALMENTE (24-25 sept) mientras se comprueba si el alcance
+  # de la cuenta se recupera. El bloque schedule esta comentado a proposito:
+  # asi no se dispara solo ninguna publicacion. Para reactivarlo, quita las
+  # "#" de las 2 lineas de abajo y vuelve a habilitar los 3 cronjobs en
+  # cron-job.org (Historia 9h/13h/18h Abuelo Tarot).
+  # schedule:
+  #   # Igual que en el bot de horoscopos: GitHub a veces no dispara los cron
+  #   # programados a su hora exacta (o directamente no los crea). Como red de
+  #   # seguridad, comprobamos cada 15 minutos y el script solo actua de verdad
+  #   # si la hora de Madrid cae en 9h/13h/18h. cron-job.org sigue activo como
+  #   # disparador de refuerzo por fuera de GitHub — el paso de cache de abajo
+  #   # evita que la misma franja se publique dos veces aunque los dos
+  #   # disparadores salten el mismo dia.
+  #   - cron: '*/15 * * * *'
   workflow_dispatch:
     inputs:
       slot:

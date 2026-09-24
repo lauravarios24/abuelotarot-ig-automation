@@ -2,9 +2,14 @@ name: Historias automaticas Instagram
 
 on:
   schedule:
-    - cron: '0 7 * * *'   # 9h Madrid (horario de verano, UTC+2)
-    - cron: '0 11 * * *'  # 13h Madrid
-    - cron: '0 16 * * *'  # 18h Madrid
+    # Igual que en el bot de horoscopos: GitHub a veces no dispara los cron
+    # programados a su hora exacta (o directamente no los crea). Como red de
+    # seguridad, comprobamos cada 15 minutos y el script solo actua de verdad
+    # si la hora de Madrid cae en 9h/13h/18h. cron-job.org sigue activo como
+    # disparador de refuerzo por fuera de GitHub — el paso de cache de abajo
+    # evita que la misma franja se publique dos veces aunque los dos
+    # disparadores salten el mismo dia.
+    - cron: '*/15 * * * *'
   workflow_dispatch:
     inputs:
       slot:
@@ -30,21 +35,28 @@ jobs:
       - name: Instalar dependencias
         run: pip install -r requirements.txt
 
-      - name: Determinar franja
+      - name: Determinar franja y fecha (Madrid)
         id: franja
+        env:
+          SLOT_MANUAL: ${{ github.event.inputs.slot }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "slot=${{ github.event.inputs.slot }}" >> "$GITHUB_OUTPUT"
-          elif [ "${{ github.event.schedule }}" = "0 7 * * *" ]; then
-            echo "slot=9h" >> "$GITHUB_OUTPUT"
-          elif [ "${{ github.event.schedule }}" = "0 11 * * *" ]; then
-            echo "slot=13h" >> "$GITHUB_OUTPUT"
-          else
-            echo "slot=18h" >> "$GITHUB_OUTPUT"
-          fi
+          read -r SLOT FECHA <<< "$(python3 -c "import os; from datetime import datetime; from zoneinfo import ZoneInfo; tz=ZoneInfo('Europe/Madrid'); ahora=datetime.now(tz); manual=(os.environ.get('SLOT_MANUAL') or '').strip(); franjas={9:'9h',13:'13h',18:'18h'}; slot=manual if manual else franjas.get(ahora.hour,'ninguno'); print(slot, ahora.strftime('%Y-%m-%d'))")"
+          echo "slot=$SLOT" >> "$GITHUB_OUTPUT"
+          echo "fecha=$FECHA" >> "$GITHUB_OUTPUT"
+
+      - name: Comprobar si esta franja ya se publico hoy
+        id: cache
+        if: github.event_name == 'schedule' && steps.franja.outputs.slot != 'ninguno'
+        uses: actions/cache@v4
+        with:
+          path: .publicada_marker
+          key: historia-${{ steps.franja.outputs.slot }}-${{ steps.franja.outputs.fecha }}
 
       - name: Publicar historia
+        if: steps.franja.outputs.slot != 'ninguno' && steps.cache.outputs.cache-hit != 'true'
         env:
           IG_USER_ID: ${{ secrets.IG_USER_ID }}
           IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
-        run: python scripts/publicar_historia.py ${{ steps.franja.outputs.slot }}
+        run: |
+          python scripts/publicar_historia.py ${{ steps.franja.outputs.slot }}
+          date > .publicada_marker
